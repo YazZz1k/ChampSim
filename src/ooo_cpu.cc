@@ -17,6 +17,7 @@
 #include "ooo_cpu.h"
 
 #include <algorithm>
+#include <fstream>
 #include <vector>
 
 #include "cache.h"
@@ -27,6 +28,64 @@
 
 extern uint8_t warmup_complete[NUM_CPUS];
 extern uint8_t MAX_INSTR_DESTINATIONS;
+
+class BranchCounter
+{
+public:
+  BranchCounter()
+  {
+    id2count.reserve(8192);
+    id2misspred.reserve(8192);
+
+    ofile.open("br_miss.txt", ios::out);
+    assert(ofile.is_open());
+  }
+
+  void predicted(uint64_t br_id)
+  {
+    zero_init(br_id);
+    ++id2count[br_id];
+  }
+
+  void misspredicted(uint64_t br_id)
+  {
+    zero_init(br_id);
+    ++id2count[br_id];
+    ++id2misspred[br_id];
+  }
+
+  ~BranchCounter()
+  {
+    print_stats(ofile);
+    ofile.close();
+  }
+
+private:
+  void zero_init(uint64_t br_id)
+  {
+    if (id2count.count(br_id) == 0) {
+      id2count.insert({br_id, 0});
+      id2misspred.insert({br_id, 0});
+    }
+  }
+
+  void print_stats(ostream& os)
+  {
+    for (auto [id, cnt] : id2count) {
+      uint64_t misspred_cnt = id2misspred.at(id);
+      double mispred_rate = static_cast<double>(misspred_cnt) / cnt;
+
+      os << hex << id << dec << " : " << cnt << " : " << misspred_cnt << " : " << mispred_rate << endl;
+    }
+  }
+
+  ofstream ofile;
+
+  unordered_map<uint64_t, uint64_t> id2count;
+  unordered_map<uint64_t, uint64_t> id2misspred;
+};
+
+static BranchCounter BrCnt;
 
 void O3_CPU::operate()
 {
@@ -234,6 +293,7 @@ void O3_CPU::init_instruction(ooo_model_instr arch_instr)
     impl_prefetcher_branch_operate(arch_instr.ip, arch_instr.branch_type, predicted_branch_target);
 
     if (predicted_branch_target != arch_instr.branch_target) {
+      BrCnt.misspredicted(arch_instr.ip);
       branch_mispredictions++;
       total_rob_occupancy_at_branch_mispredict += ROB.occupancy();
       branch_type_misses[arch_instr.branch_type]++;
@@ -243,6 +303,7 @@ void O3_CPU::init_instruction(ooo_model_instr arch_instr)
         arch_instr.branch_mispredicted = 1;
       }
     } else {
+      BrCnt.predicted(arch_instr.ip);
       // if correctly predicted taken, then we can't fetch anymore instructions
       // this cycle
       if (arch_instr.branch_taken == 1) {
